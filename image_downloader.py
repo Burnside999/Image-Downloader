@@ -5,6 +5,7 @@
 from __future__ import print_function
 
 import argparse
+import os
 import sys
 
 import crawler
@@ -25,7 +26,7 @@ def main(argv):
                         help="Number of threads to concurrently download images.")
     parser.add_argument("--timeout", "-t", type=int, default=10,
                         help="Seconds to timeout when download an image.")
-    parser.add_argument("--output", "-o", type=str, default="./download_images",
+    parser.add_argument("--output", "-o", type=str, default=None,
                         help="Output directory to save downloaded images.")
     parser.add_argument("--safe-mode", "-S", action="store_true", default=False,
                         help="Turn on safe search mode. (Only effective in Google)")
@@ -59,6 +60,12 @@ def main(argv):
     if not utils.resolve_dependencies(args.driver):
         print("Dependencies not resolved, exit.")
         return
+
+    if args.output is None:
+        keyword_dir = utils.gen_valid_dir_name_for_keywords(args.keywords)
+        if not keyword_dir:
+            keyword_dir = "download_images"
+        args.output = os.path.join("./download_images", keyword_dir)
 
     crawled_urls = crawler.crawl_image_urls(args.keywords,
                                             engine=args.engine, max_number=args.max_number,
