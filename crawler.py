@@ -16,6 +16,8 @@ from urllib.parse import unquote, quote
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
+from selenium.common.exceptions import StaleElementReferenceException, TimeoutException
+from selenium.webdriver.support.ui import WebDriverWait
 import requests
 from concurrent import futures
 
@@ -70,65 +72,95 @@ def google_gen_query_url(keywords, face_only=False, safe_mode=False, image_type=
 
 
 def google_image_url_from_webpage(driver, max_number, quiet=False):
-    thumb_elements_old = []
+    """Collect image URLs from Google Images search results page."""
+
+    wait = WebDriverWait(driver, 10)
     thumb_elements = []
+    last_count = -1
+    thumb_selector = "img.rg_i, img.Q4LuWd"
+
     while True:
         try:
-            thumb_elements = driver.find_elements(By.CLASS_NAME, "rg_i")
+            thumb_elements = driver.find_elements(By.CSS_SELECTOR, thumb_selector)
             my_print("Find {} images.".format(len(thumb_elements)), quiet)
             if len(thumb_elements) >= max_number:
                 break
-            if len(thumb_elements) == len(thumb_elements_old):
+            if len(thumb_elements) == last_count:
                 break
-            thumb_elements_old = thumb_elements
+            last_count = len(thumb_elements)
             driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
             time.sleep(2)
-            show_more = driver.find_elements(By.CLASS_NAME, "mye4qd")
-            if len(show_more) == 1 and show_more[0].is_displayed() and show_more[0].is_enabled():
-                my_print("Click show_more button.", quiet)
-                show_more[0].click()
-            time.sleep(3)
+            show_more = driver.find_elements(By.CSS_SELECTOR, ".mye4qd, .YstHxe")
+            for btn in show_more:
+                try:
+                    if btn.is_displayed() and btn.is_enabled():
+                        my_print("Click show_more button.", quiet)
+                        btn.click()
+                        time.sleep(2)
+                        break
+                except Exception:
+                    continue
+            time.sleep(2)
         except Exception as e:
             print("Exception ", e)
-            pass
-    
+            break
+
     if len(thumb_elements) == 0:
         return []
 
     my_print("Click on each thumbnail image to get image url, may take a moment ...", quiet)
 
-    retry_click = []
-    for i, elem in enumerate(thumb_elements):
+    image_urls = []
+    collected = set()
+
+    index = 0
+    while index < len(thumb_elements) and len(image_urls) < max_number:
         try:
-            if i != 0 and i % 50 == 0:
-                my_print("{} thumbnail clicked.".format(i), quiet)
+            thumb_elements = driver.find_elements(By.CSS_SELECTOR, thumb_selector)
+            if index >= len(thumb_elements):
+                break
+            elem = thumb_elements[index]
+            index += 1
+
             if not elem.is_displayed() or not elem.is_enabled():
-                retry_click.append(elem)
                 continue
-            elem.click()
-        except Exception as e:
-            print("Error while clicking in thumbnail:", e)
-            retry_click.append(elem)
 
-    if len(retry_click) > 0:    
-        my_print("Retry some failed clicks ...", quiet)
-        for elem in retry_click:
+            driver.execute_script(
+                "arguments[0].scrollIntoView({behavior: 'auto', block: 'center'});",
+                elem,
+            )
+            time.sleep(0.3)
+
             try:
-                if elem.is_displayed() and elem.is_enabled():
-                    elem.click()
-            except Exception as e:
-                print("Error while retrying click:", e)
-    
-    image_elements = driver.find_elements(By.CLASS_NAME, "islib")
-    image_urls = list()
-    url_pattern = r"imgurl=\S*&amp;imgrefurl"
+                elem.click()
+            except Exception:
+                try:
+                    driver.execute_script("arguments[0].click();", elem)
+                except Exception as e:
+                    print("Error while clicking thumbnail:", e)
+                    continue
 
-    for image_element in image_elements[:max_number]:
-        outer_html = image_element.get_attribute("outerHTML")
-        re_group = re.search(url_pattern, outer_html)
-        if re_group is not None:
-            image_url = unquote(re_group.group()[7:-14])
-            image_urls.append(image_url)
+            try:
+                wait.until(
+                    lambda d: any(
+                        img.get_attribute("src") and img.get_attribute("src").startswith("http")
+                        for img in d.find_elements(By.CSS_SELECTOR, "img.n3VNCb")
+                    )
+                )
+            except TimeoutException:
+                continue
+
+            full_images = driver.find_elements(By.CSS_SELECTOR, "img.n3VNCb")
+            for img in full_images:
+                src = img.get_attribute("src")
+                if src and src.startswith("http") and src not in collected:
+                    collected.add(src)
+                    image_urls.append(src)
+                    if len(image_urls) >= max_number:
+                        break
+        except StaleElementReferenceException:
+            continue
+
     return image_urls
 
 
