@@ -29,6 +29,7 @@ g_headers = {
     "Proxy-Connection": "keep-alive",
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
     "Accept-Encoding": "gzip, deflate, sdch",
     # 'Connection': 'close',
 }
@@ -326,7 +327,27 @@ def baidu_image_url_from_webpage(driver):
 
 
 def baidu_get_image_url_using_api(keywords, max_number=10000, face_only=False,
-                                  proxy=None, proxy_type=None):
+                                  proxy=None, proxy_type=None, color=None):
+    def build_session():
+        session = requests.Session()
+        headers = g_headers.copy()
+        search_url = baidu_gen_query_url(keywords, face_only, False, color)
+
+        for _ in range(3):
+            try:
+                response = session.get(
+                    search_url,
+                    headers=headers,
+                    proxies=proxies,
+                    timeout=10,
+                )
+                if response.status_code == 200:
+                    return session, search_url
+            except Exception:
+                time.sleep(1)
+
+        return None, search_url
+
     def decode_url(url):
         in_table = '0123456789abcdefghijklmnopqrstuvw'
         out_table = '7dgjmoru140852vsnkheb963wtqplifca'
@@ -350,8 +371,55 @@ def baidu_get_image_url_using_api(keywords, max_number=10000, face_only=False,
         proxies = {"http": "{}://{}".format(proxy_type, proxy),
                    "https": "{}://{}".format(proxy_type, proxy)}
 
-    res = requests.get(init_url, proxies=proxies, headers=g_headers)
-    init_json = json.loads(res.text.replace(r"\'", "").encode("utf-8"), strict=False)
+    session, referer_url = build_session()
+    if session is None:
+        print("Failed to initialise Baidu session.")
+        return []
+
+    cookies = session.cookies.get_dict()
+    api_headers = {
+        "User-Agent": g_headers["User-Agent"],
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Accept-Language": g_headers.get("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8"),
+        "Referer": referer_url,
+        "X-Requested-With": "XMLHttpRequest",
+    }
+
+    init_response = None
+    for _ in range(3):
+        try:
+            init_response = requests.get(
+                init_url,
+                proxies=proxies,
+                headers=api_headers,
+                cookies=cookies,
+                timeout=10,
+            )
+        except Exception as exc:
+            init_response = None
+            time.sleep(1)
+            continue
+
+        if init_response.status_code != 200:
+            init_response = None
+            time.sleep(1)
+            continue
+
+        if 'forbid spider access' in init_response.text.lower():
+            init_response = None
+            time.sleep(1)
+            continue
+        break
+
+    if init_response is None:
+        print("Failed to fetch Baidu image metadata.")
+        return []
+
+    try:
+        init_json = json.loads(init_response.text.replace(r"\'", ""), strict=False)
+    except json.JSONDecodeError as exc:
+        print(exc)
+        return []
     total_num = init_json['listNum']
 
     target_num = min(max_number, total_num)
@@ -360,48 +428,63 @@ def baidu_get_image_url_using_api(keywords, max_number=10000, face_only=False,
     crawled_urls = list()
     batch_size = 30
 
-    with futures.ThreadPoolExecutor(max_workers=5) as executor:
-        future_list = list()
+    def process_batch(batch_no):
+        image_urls = list()
+        url = query_url + "&pn={}&rn={}".format(batch_no * batch_size, batch_size)
+        try_time = 0
+        while True:
+            try:
+                response = session.get(
+                    url,
+                    proxies=proxies,
+                    headers=api_headers,
+                    timeout=10,
+                )
+            except Exception as e:
+                try_time += 1
+                if try_time > 3:
+                    print(e)
+                    return image_urls
+                time.sleep(1)
+                continue
 
-        def process_batch(batch_no, batch_size):
-            image_urls = list()
-            url = query_url + \
-                "&pn={}&rn={}".format(batch_no * batch_size, batch_size)
-            try_time = 0
-            while True:
-                try:
-                    response = requests.get(url, proxies=proxies, headers=g_headers)
-                    break
-                except Exception as e:
-                    try_time += 1
-                    if try_time > 3:
-                        print(e)
-                        return image_urls
-            response.encoding = 'utf-8'
-            res_json = json.loads(response.text.replace(r"\'", ""), strict=False)
-            for data in res_json['data']:
-                # if 'middleURL' in data.keys():
-                #     url = data['middleURL']
-                #     image_urls.append(url)
-                if 'objURL' in data.keys():
-                    url = unquote(decode_url(data['objURL']))
-                    if 'src=' in url:
-                        url_p1 = url.split('src=')[1]
-                        url = url_p1.split('&refer=')[0]
-                    image_urls.append(url)
-                    # print(url)
-                elif 'replaceUrl' in data.keys() and len(data['replaceUrl']) == 2:
-                    image_urls.append(data['replaceUrl'][1]['ObjURL'])
+            if response.status_code != 200:
+                try_time += 1
+                if try_time > 3:
+                    print("Unexpected status code {}".format(response.status_code))
+                    return image_urls
+                time.sleep(1)
+                continue
 
-            return image_urls
+            if 'forbid spider access' in response.text.lower():
+                try_time += 1
+                if try_time > 3:
+                    print("Baidu blocked the request.")
+                    return image_urls
+                time.sleep(1)
+                continue
 
-        for i in range(0, int((crawl_num + batch_size - 1) / batch_size)):
-            future_list.append(executor.submit(process_batch, i, batch_size))
-        for future in futures.as_completed(future_list):
-            if future.exception() is None:
-                crawled_urls += future.result()
-            else:
-                print(future.exception())
+            break
+
+        response.encoding = 'utf-8'
+        res_json = json.loads(response.text.replace(r"\'", ""), strict=False)
+        for data in res_json['data']:
+            if 'objURL' in data.keys():
+                url = unquote(decode_url(data['objURL']))
+                if 'src=' in url:
+                    url_p1 = url.split('src=')[1]
+                    url = url_p1.split('&refer=')[0]
+                image_urls.append(url)
+            elif 'replaceUrl' in data.keys() and len(data['replaceUrl']) == 2:
+                image_urls.append(data['replaceUrl'][1]['ObjURL'])
+
+        return image_urls
+
+    total_batches = int((crawl_num + batch_size - 1) / batch_size)
+    for batch_no in range(total_batches):
+        crawled_urls.extend(process_batch(batch_no))
+        if len(crawled_urls) >= target_num:
+            break
 
     return crawled_urls[:min(len(crawled_urls), target_num)]
 
@@ -472,10 +555,26 @@ def crawl_image_urls(keywords, engine="Google", max_number=10000,
             driver.get(query_url)
             image_urls = baidu_image_url_from_webpage(driver)
         driver.close()
+        if engine == "Baidu" and len(image_urls) == 0:
+            my_print("Falling back to Baidu API search.", quiet)
+            image_urls = baidu_get_image_url_using_api(
+                keywords,
+                max_number=max_number,
+                face_only=face_only,
+                proxy=proxy,
+                proxy_type=proxy_type,
+                color=color,
+            )
     else: # api
         if engine == "Baidu":
-            image_urls = baidu_get_image_url_using_api(keywords, max_number=max_number, face_only=face_only,
-                                                       proxy=proxy, proxy_type=proxy_type)
+            image_urls = baidu_get_image_url_using_api(
+                keywords,
+                max_number=max_number,
+                face_only=face_only,
+                proxy=proxy,
+                proxy_type=proxy_type,
+                color=color,
+            )
         elif engine == "Bing":
             image_urls = bing_get_image_url_using_api(keywords, max_number=max_number, face_only=face_only,
                                                       proxy=proxy, proxy_type=proxy_type)
