@@ -143,6 +143,35 @@ def handle_google_consent(driver, quiet=False):
     return handled
 
 
+def _extract_image_sources(img):
+    """Return a list of potential HTTP image URLs from an <img> element."""
+
+    candidates = []
+    attr_names = [
+        "src",
+        "data-src",
+        "data-iurl",
+        "data-lazysrc",
+        "data-deferred",
+    ]
+
+    for attr in attr_names:
+        value = img.get_attribute(attr)
+        if value and value.startswith("http"):
+            candidates.append(value)
+
+    if not candidates:
+        srcset = img.get_attribute("srcset")
+        if srcset:
+            for entry in srcset.split(","):
+                url = entry.strip().split(" ")[0]
+                if url.startswith("http"):
+                    candidates.append(url)
+                    break
+
+    return candidates
+
+
 def google_image_url_from_webpage(driver, max_number, quiet=False):
     """Collect image URLs from Google Images search results page."""
 
@@ -150,6 +179,15 @@ def google_image_url_from_webpage(driver, max_number, quiet=False):
     thumb_elements = []
     last_count = -1
     thumb_selector = "img.rg_i, img.Q4LuWd, img.YQ4gaf"
+    full_image_selector = ",".join(
+        [
+            "img.n3VNCb",
+            "img.sFlh5c",
+            "img.iPVvYb",
+            "img.r48jcc",
+            "img.oCCRx",
+        ]
+    )
 
     handle_google_consent(driver, quiet)
 
@@ -223,21 +261,23 @@ def google_image_url_from_webpage(driver, max_number, quiet=False):
             try:
                 wait.until(
                     lambda d: any(
-                        img.get_attribute("src") and img.get_attribute("src").startswith("http")
-                        for img in d.find_elements(By.CSS_SELECTOR, "img.n3VNCb")
+                        _extract_image_sources(img)
+                        for img in d.find_elements(By.CSS_SELECTOR, full_image_selector)
                     )
                 )
             except TimeoutException:
                 continue
 
-            full_images = driver.find_elements(By.CSS_SELECTOR, "img.n3VNCb")
+            full_images = driver.find_elements(By.CSS_SELECTOR, full_image_selector)
             for img in full_images:
-                src = img.get_attribute("src")
-                if src and src.startswith("http") and src not in collected:
-                    collected.add(src)
-                    image_urls.append(src)
-                    if len(image_urls) >= max_number:
-                        break
+                for src in _extract_image_sources(img):
+                    if src not in collected:
+                        collected.add(src)
+                        image_urls.append(src)
+                        if len(image_urls) >= max_number:
+                            break
+                if len(image_urls) >= max_number:
+                    break
         except StaleElementReferenceException:
             continue
 
