@@ -16,7 +16,10 @@ from urllib.parse import unquote, quote
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
-from selenium.common.exceptions import StaleElementReferenceException, TimeoutException
+from selenium.common.exceptions import (
+    StaleElementReferenceException,
+    TimeoutException,
+)
 from selenium.webdriver.support.ui import WebDriverWait
 import requests
 from concurrent import futures
@@ -71,6 +74,66 @@ def google_gen_query_url(keywords, face_only=False, safe_mode=False, image_type=
     return query_url
 
 
+def _click_google_consent_button(driver, quiet=False):
+    """Try to click the consent button shown before Google results."""
+
+    buttons = driver.find_elements(By.TAG_NAME, "button")
+    keywords = ("accept", "agree")
+
+    for button in buttons:
+        try:
+            if not button.is_displayed() or not button.is_enabled():
+                continue
+
+            label_parts = [
+                button.text or "",
+                button.get_attribute("aria-label") or "",
+                button.get_attribute("innerText") or "",
+            ]
+            label = " ".join(label_parts).strip().lower()
+            if any(keyword in label for keyword in keywords):
+                my_print("Accepting Google consent dialog.", quiet)
+                button.click()
+                time.sleep(2)
+                return True
+        except Exception:
+            continue
+
+    return False
+
+
+def handle_google_consent(driver, quiet=False):
+    """Handle the consent dialog that blocks Google Images in some regions."""
+
+    time.sleep(1)
+
+    handled = False
+
+    try:
+        if _click_google_consent_button(driver, quiet):
+            return True
+
+        iframes = driver.find_elements(By.TAG_NAME, "iframe")
+        for iframe in iframes:
+            frame_id = (iframe.get_attribute("id") or "").lower()
+            frame_src = (iframe.get_attribute("src") or "").lower()
+            if "consent" not in frame_id and "consent" not in frame_src:
+                continue
+
+            try:
+                driver.switch_to.frame(iframe)
+                handled = _click_google_consent_button(driver, quiet)
+            finally:
+                driver.switch_to.default_content()
+
+            if handled:
+                break
+    except Exception:
+        driver.switch_to.default_content()
+
+    return handled
+
+
 def google_image_url_from_webpage(driver, max_number, quiet=False):
     """Collect image URLs from Google Images search results page."""
 
@@ -78,6 +141,8 @@ def google_image_url_from_webpage(driver, max_number, quiet=False):
     thumb_elements = []
     last_count = -1
     thumb_selector = "img.rg_i, img.Q4LuWd"
+
+    handle_google_consent(driver, quiet)
 
     while True:
         try:
