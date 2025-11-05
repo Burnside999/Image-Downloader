@@ -21,6 +21,7 @@ from selenium.common.exceptions import (
     TimeoutException,
 )
 from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 import requests
 from concurrent import futures
 
@@ -79,9 +80,16 @@ def _click_google_consent_button(driver, quiet=False):
     """Try to click the consent button shown before Google results."""
 
     buttons = driver.find_elements(By.TAG_NAME, "button")
-    keywords = ("accept", "agree")
+    buttons.extend(driver.find_elements(By.CSS_SELECTOR, "[role='button']"))
+    seen = set()
+    keywords = ("accept", "agree", "consent", "同意", "接受")
 
     for button in buttons:
+        element_id = getattr(button, "id", None)
+        if element_id:
+            if element_id in seen:
+                continue
+            seen.add(element_id)
         try:
             if not button.is_displayed() or not button.is_enabled():
                 continue
@@ -141,9 +149,15 @@ def google_image_url_from_webpage(driver, max_number, quiet=False):
     wait = WebDriverWait(driver, 10)
     thumb_elements = []
     last_count = -1
-    thumb_selector = "img.rg_i, img.Q4LuWd"
+    thumb_selector = "img.rg_i, img.Q4LuWd, img.YQ4gaf"
 
     handle_google_consent(driver, quiet)
+
+    try:
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, thumb_selector)))
+    except TimeoutException:
+        my_print("No image thumbnails found on the Google Images page.", quiet)
+        return []
 
     while True:
         try:
